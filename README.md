@@ -3,8 +3,8 @@
 A Video Assistant Referee review tool for football footage. Open any video file and you can:
 
 - **Replay it frame by frame:** play, pause, step one or ten frames, slow motion down to 0.1x, a seek bar, and zoom up to 10x at the cursor.
-- **Mark it up:** draw straight lines and freehand on any frame. Markup is saved per frame.
-- **Draw offside lines:** calibrate the frame's perspective from the pitch markings, then click the attacker and the second-last defender. You get true offside lines that follow the pitch's perspective, plus a verdict.
+- **Mark it up:** draw straight lines and freehand on any frame. Markup is kept per frame while the window is open.
+- **Draw offside lines:** calibrate the frame's perspective from the pitch markings, then click the attacker and the second-last defender. You get true offside lines that follow the pitch's perspective, plus a verdict. The "behind the ball" exception is applied when the ball's position is known.
 - **Detect players and the ball automatically:** a pretrained YOLO model boxes every player and the ball and draws the ball's recent path. In offside mode, clicking a detected player snaps the point to their feet.
 - **Split players into teams by jersey colour:** each team's boxes are drawn in its shirt colour. Referees, goalkeepers and fans in the stands are shown in grey.
 - **Find the second-last defender automatically:** click the attacker, and the tool works out the defending team and draws the defender's offside line.
@@ -30,6 +30,95 @@ It works with any format OpenCV can decode (mp4, mkv, avi, mov...). Use `--max-w
 
 Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the first GPU), `--player-conf`, `--ball-conf` and `--weights`.
 
+## Step-by-step guide
+
+This walks through a full offside review, from opening a clip to saving the evidence. Each feature has its own section further down with more detail.
+
+### 1. The window
+
+- **Video:** the current frame, with your markup and any detections drawn on it. The verdict appears at the top left once there's enough to decide.
+- **Seek bar** (`frame`, at the top): drag it to jump anywhere in the clip.
+- **Status strip** (under the video): the first line shows the frame number, time, playback speed, play/pause, zoom, current mode and detection progress. The second line, in yellow, shows the last message or a hint for the current mode. Read it after every key press: it tells you what the tool did and what it needs next.
+- **Help:** press `h` to show or hide the list of controls over the video.
+
+### 2. Find the frame where the ball is played
+
+Offside is judged at the moment the ball is passed, so the whole review happens on that one frame.
+
+1. Press `space` to play and `space` again to pause near the pass.
+2. Use `[` to slow down (down to 0.1x) if the moment is hard to catch.
+3. Step with `a` / `d` (or the arrow keys) one frame at a time, or `A` / `D` for 10 frames, until the ball has just left the passer's foot.
+4. Zoom with the mouse wheel (or `+` / `-`) on the area you care about. In view mode (`1`), drag to pan. `z` resets the zoom.
+
+### 3. Turn on detection and teams
+
+Press `t`. This turns on player and ball detection and colours each player by team. The first time, the YOLO model downloads (5 MB) and takes 20–30 seconds to start on CPU. The status strip shows its progress.
+
+For the best team split, press `p` once to analyse the whole clip in the background: the more frames the tool sees, the steadier the team colours. Check that the two teams have different colours and that referees and goalkeepers are grey. If the keeper is shown in their team's colour, press `g` (see [the goalkeeper rule](#automatic-second-last-defender)).
+
+You can skip this step and do everything by hand (step 5b).
+
+### 4. Calibrate the frame
+
+Press `4`, then click:
+
+1. Two points on the **goal line**, as far apart as you can.
+2. Two points on the **6-yard or 18-yard line at the same end**, also far apart.
+
+Zoom in for each click: accuracy here sets the accuracy of every line. The two segments are drawn in yellow. Calibration belongs to this frame only, because the camera moves between frames. To redo it, press `u` and click again.
+
+### 5a. Automatic check
+
+Press `o`. The tool:
+
+1. Finds the attacking team from the player who has the ball.
+2. Picks the most advanced attacker (**ATT (auto)**, red line).
+3. Picks the second-last defender (**DEF (auto)**, blue line).
+4. Places the ball's ground point if the ball is at someone's feet (**BALL (auto)**, orange line).
+
+Then **check every pick against the video**:
+
+- Wrong attacking team (or "Can't tell which team is attacking")? Press `m`.
+- The attacker who receives the ball isn't the most advanced one? Press `n` until it is, or left-click them.
+- Wrong defender? Right-click the correct one.
+- The ball is in the air, or wasn't found? Shift+click the spot on the ground directly under it.
+
+### 5b. Manual check
+
+Press `5`, then:
+
+1. **Left-click the attacker.** Click the ground directly under the furthest-forward part of their body that can legally score (head, body or feet, not hands or arms). With detection on, a click inside a player's box snaps to their feet. Hold `Ctrl` to place the point exactly where you click, which is better for a close call.
+2. **Right-click the second-last defender** in the same way. With teams on, this is done for you when you place the attacker. Press `f` to redo the automatic pick.
+3. **Shift+click under the ball** if it's nearer the goal line than the defender, so the behind-the-ball exception applies.
+
+Clicking again moves a point. `u` undoes one change at a time, and `x` clears the frame.
+
+### 6. Read the verdict
+
+The verdict appears at the top left:
+
+| Verdict | Meaning |
+|---|---|
+| **OFFSIDE** | The attacker is nearer the goal line than the offside line |
+| **ONSIDE** | The attacker is level with or behind the offside line |
+| **LEVEL** | Within half a pixel of the line: level counts as onside |
+| **ONSIDE - behind the ball** | Beyond the defender, but not beyond the ball |
+
+The number in brackets is the margin in screen pixels: positive means beyond the line. Each line is drawn through the vanishing point, so it follows the pitch's perspective. If the lines don't look parallel to the pitch markings, the calibration is off: redo step 4.
+
+### 7. Save the evidence
+
+Press `s`. A full-resolution PNG of the frame, with the lines, labels, verdict, file name and timestamp, is saved to `snapshots\<clip>_f<frame>.png` in the folder you ran the tool from.
+
+Markup is kept for each frame while the window is open, so you can step away and come back to it. It isn't saved to disk, so save a snapshot of each frame you want to keep before quitting with `q` or `Esc`.
+
+### Tips
+
+- On a slow computer, press `p` first and let detection run ahead before reviewing, so stepping through frames is instant.
+- For wide shots where the ball is tiny, try `--ball-conf 0.1`, and be ready to choose the team with `m` and Shift+click the ball.
+- Always zoom in before placing points for a close call. A few pixels can change the verdict.
+- Treat the automatic picks as suggestions. The tool can only use players it detected and gave a team.
+
 ## Controls
 
 | Key | Action |
@@ -53,6 +142,7 @@ Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the f
 | `f` | Find the second-last defender automatically (needs teams) |
 | `g` | Switch the keeper rule: keeper wears team colours, or not (default) |
 | `Ctrl`+click | In offside mode, place the point exactly instead of snapping to a detected player |
+| `Shift`+click | In offside mode, mark the ball's ground point (for the behind-the-ball exception) |
 | `u` | Undo the last action on this frame |
 | `x` | Clear this frame's markup |
 | `s` | Save a snapshot |
@@ -66,6 +156,15 @@ Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the f
 4. Read the verdict at the top left and press `s` to save the evidence.
 
 With teams on (`t`), step 3 is a single click. Left-click the attacker, and the defender line is placed for you. Or press `o`, and both players are chosen for you (see below).
+
+### Behind the ball
+
+Under Law 11 an attacker is only in an offside position if they are nearer the goal line than **both** the second-last defender and the ball. So on a cut-back, an attacker beyond the defender but level with or behind the ball is onside.
+
+- **Automatic:** when you place the attacker (by click or `o`) and the detected ball is at a player's feet, its ground point is taken from the bottom of the ball's box and labelled **BALL (auto)**.
+- **By hand:** a ball in the air can't be placed on the pitch from its box, because its ground point is somewhere below it. Shift+click the spot on the ground directly under the ball. Your point is kept when the attacker or `o` is re-run, and `u` undoes it.
+
+The offside line is whichever of the defender and the ball is nearer the goal line. When the ball sets it, the verdict says so: **ONSIDE - behind the ball**, **LEVEL with the ball** or **OFFSIDE (beyond the ball)**, with the margin measured from the ball. With no ball point, the verdict is judged against the defender only.
 
 ### How it works
 
@@ -141,6 +240,7 @@ On the frame where the ball is played, calibrate (`4`), turn on teams (`t`) and 
 1. **Attacking team:** the team of the player whose feet are nearest the ball. At the moment of the pass, that's the passer. "Nearest" has a limit based on that player's size on screen, so a ball in the air or out of reach doesn't count.
 2. **Attacker:** every attacking player is ranked by distance to the goal line, measured in the pitch's perspective. The passer is left out, because a player can't be offside from their own pass. The **most advanced** attacker is checked first: if they're onside, every attacker is. Their line is labelled **ATT (auto)**.
 3. **Defender:** the second-last defender is found as described above, unless you've already set one by hand.
+4. **Ball:** if the ball is at a player's feet, its ground point is placed for the behind-the-ball exception (see above). Otherwise the message asks you to Shift+click under it.
 
 **When to step in:**
 
@@ -152,7 +252,7 @@ On the frame where the ball is played, calibrate (`4`), turn on teams (`t`) and 
 
 - The pick is only as good as the ball and player detection and the team colours.
 - An attacker who wasn't detected or got no team is never considered.
-- The tool doesn't apply the "behind the ball" exception. An attacker level with or behind the ball when it's played is onside, whatever the line shows.
+- The behind-the-ball exception needs the ball's ground point. If the ball is in the air or not detected, Shift+click under it, or the verdict ignores the ball.
 
 ## Tests
 
@@ -160,4 +260,4 @@ On the frame where the ball is played, calibrate (`4`), turn on teams (`t`) and 
 .venv\Scripts\python.exe -m pytest
 ```
 
-The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The auto-defender and auto-attacker tests run the app with a fake detector (see `tests/conftest.py`). They cover picking by pitch depth, the keeper rule, finding the ball carrier, leaving out the passer, cycling attackers, switching teams, manual overrides, Ctrl+click and undo. The tests don't need the YOLO model.
+The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The auto-defender and auto-attacker tests run the app with a fake detector (see `tests/conftest.py`). They cover picking by pitch depth, the keeper rule, finding the ball carrier, leaving out the passer, cycling attackers, switching teams, manual overrides, Ctrl+click, undo and the behind-the-ball exception (auto ball point, Shift+click, a ball in the air). The tests don't need the YOLO model.
