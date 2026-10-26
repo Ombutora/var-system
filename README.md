@@ -7,6 +7,7 @@ A Video Assistant Referee review tool for football footage. Open any video file 
 - **Draw offside lines:** calibrate the frame's perspective from the pitch markings, then click the attacker and the second-last defender. You get true offside lines that follow the pitch's perspective, plus a verdict.
 - **Detect players and the ball automatically:** a pretrained YOLO model boxes every player and the ball and draws the ball's recent path. In offside mode, clicking a detected player snaps the point to their feet.
 - **Split players into teams by jersey colour:** each team's boxes are drawn in its shirt colour. Referees, goalkeepers and fans in the stands are shown in grey.
+- **Find the second-last defender automatically:** click the attacker, and the tool works out the defending team and draws the defender's offside line.
 - **Save snapshots:** full-resolution PNGs of the marked-up frame, written to `snapshots/`.
 
 ## Setup
@@ -45,6 +46,8 @@ Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the f
 | `v` | Turn player and ball detection on or off |
 | `p` | Analyse the whole clip in the background, starting from this frame |
 | `t` | Turn team colours on or off (also turns on detection) |
+| `f` | Find the second-last defender automatically (needs teams) |
+| `g` | Switch the keeper rule: keeper wears team colours, or not (default) |
 | `Ctrl`+click | In offside mode, place the point exactly instead of snapping to a detected player |
 | `u` | Undo the last action on this frame |
 | `x` | Clear this frame's markup |
@@ -57,6 +60,8 @@ Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the f
 2. Press `4`. Click two points on the **goal line**, then two points on the **6-yard or 18-yard line at the same end**. Click points far apart along each line, and zoom in for accuracy.
 3. Press `5`. Left-click the **ground point directly under** the attacker's furthest-forward body part that can score (not hands or arms), then right-click the same for the second-last defender. Clicking again moves a player.
 4. Read the verdict at the top left and press `s` to save the evidence.
+
+With teams on (`t`), step 3 is a single click. Left-click the attacker, and the defender line is placed for you (see below).
 
 ### How it works
 
@@ -103,10 +108,32 @@ How it works (see `teams.py`):
 - A goalkeeper whose kit looks like one team's kit is put in that team.
 - "Team A" and "Team B" are only names. The tool doesn't know which side is attacking.
 
+## Automatic second-last defender
+
+With the frame calibrated and teams on, left-click inside the attacker's box. Then:
+
+1. **Defending team:** the attacker's team (A or B) is read from the box you clicked, so the defending team is the other one. Ctrl+click still reads the team but places the point exactly.
+2. **Ranking:** every visible defending player is ranked by how close their feet are to the goal line, measured along the pitch's perspective, not by height on screen.
+3. **Placing the line:** the second-last defender is chosen, and their line is drawn labelled **DEF (auto)**.
+
+**The goalkeeper rule.** The offside line is set by the second-last opponent, and the last one is usually the goalkeeper.
+
+- **Default:** keepers wear a different kit, so they normally show up grey and aren't counted in the team. The deepest outfield defender is then the second-last defender. This also works when the keeper is out of shot.
+- **Press `g`** if the keeper is grouped with their team. The tool then skips the deepest player and takes the second deepest.
+- **If the keeper has come off their line,** so that an outfield player is the last defender, right-click the correct defender.
+
+**Overriding it:**
+
+- A right-click always sets the defender by hand, and moving the attacker afterwards keeps your choice.
+- Press `f` to re-run the automatic pick on this frame.
+- `u` undoes the auto defender first, then the attacker.
+
+**It can only rank players who were detected and assigned to a team.** If the real second-last defender is hidden, merged with another player's box, or shown grey, the tool picks someone else. Always check the pick before trusting the verdict.
+
 ## Tests
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The tests don't need the YOLO model.
+The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The auto-defender tests run the app with a fake detector. They cover picking by pitch depth, the keeper rule, manual overrides, Ctrl+click and undo. The tests don't need the YOLO model.
