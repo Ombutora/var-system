@@ -79,6 +79,25 @@ def test_offside_line_follows_pitch_line():
         assert abs(a * x + b * y + c) / np.hypot(a, b) < 1e-6
 
 
+def test_second_last_defender_uses_pitch_depth_not_screen_position():
+    goal, inner = segment(PERSPECTIVE, 0), segment(PERSPECTIVE, 16.5)
+    # (u = metres from goal line, v = across). Wide players look "further up" on screen.
+    defenders = [project(PERSPECTIVE, u, v) for u, v in [(20, -30), (8.0, 30), (12, 0), (8.5, -30)]]
+    # Keeper not in the list: the deepest outfield player (u = 8.0) is second-last
+    assert geometry.second_last_defender(goal, inner, defenders) == 1
+    # Keeper in the list (u = 1): skip them and take the next deepest
+    with_keeper = defenders + [project(PERSPECTIVE, 1.0, 5)]
+    assert geometry.second_last_defender(goal, inner, with_keeper, keeper_in_list=True) == 1
+
+
+def test_second_last_defender_needs_enough_players():
+    goal, inner = segment(PERSPECTIVE, 0), segment(PERSPECTIVE, 16.5)
+    one = [project(PERSPECTIVE, 10, 0)]
+    assert geometry.second_last_defender(goal, inner, []) is None
+    assert geometry.second_last_defender(goal, inner, one, keeper_in_list=True) is None
+    assert geometry.second_last_defender(goal, inner, one) == 0
+
+
 def test_identical_calibration_lines_rejected():
     seg = ((0, 0), (10, 10))
     with pytest.raises(ValueError):

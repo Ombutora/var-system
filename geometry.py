@@ -80,19 +80,16 @@ def depth_along(line, transversal, origin, direction):
     return float(np.dot(xy - origin, direction))
 
 
-def offside_verdict(goal_seg, inner_seg, attacker, defender, tolerance=0.0):
-    """Compare an attacker and the second-last defender against the goal line.
+def goal_depths(goal_seg, inner_seg, points):
+    """How far toward the goal line each ground point is (larger = nearer the goal line).
 
     goal_seg  -- segment on the goal line
     inner_seg -- segment on another line parallel to it (6-yard or 18-yard line)
-    attacker, defender -- image ground points (x, y)
 
     Every offside line passes through the vanishing point, so the lines are
     ordered by where they cut any transversal that avoids that point. The
-    transversal used joins the midpoints of the two calibration segments.
-
-    Returns ("OFFSIDE" | "ONSIDE" | "LEVEL", margin) where margin is in pixels
-    along the transversal (positive = attacker nearer the goal line).
+    transversal used joins the midpoints of the two calibration segments, and
+    depths are pixels along it.
     """
     vp = vanishing_point(goal_seg, inner_seg)
     m_goal = (np.asarray(goal_seg[0], float) + np.asarray(goal_seg[1], float)) / 2
@@ -102,9 +99,32 @@ def offside_verdict(goal_seg, inner_seg, attacker, defender, tolerance=0.0):
         raise ValueError("calibration lines are too close together")
     toward_goal = span / np.linalg.norm(span)
     transversal = line_through(to_h(m_inner), to_h(m_goal))
+    return [depth_along(offside_line(p, vp), transversal, m_inner, toward_goal) for p in points]
 
-    d_att = depth_along(offside_line(attacker, vp), transversal, m_inner, toward_goal)
-    d_def = depth_along(offside_line(defender, vp), transversal, m_inner, toward_goal)
+
+def second_last_defender(goal_seg, inner_seg, defenders, keeper_in_list=False):
+    """Index into `defenders` (ground points) of the second-last defender, or None.
+
+    The goalkeeper is normally the last defender. If the keeper is not in the
+    list (their kit differs from the outfield players'), the deepest player
+    listed is the second-last defender; if the keeper is in it, the second deepest.
+    """
+    rank = 1 if keeper_in_list else 0
+    if len(defenders) <= rank:
+        return None
+    depths = goal_depths(goal_seg, inner_seg, defenders)
+    return int(np.argsort(depths)[::-1][rank])
+
+
+def offside_verdict(goal_seg, inner_seg, attacker, defender, tolerance=0.0):
+    """Compare an attacker and the second-last defender against the goal line.
+
+    attacker, defender -- image ground points (x, y)
+
+    Returns ("OFFSIDE" | "ONSIDE" | "LEVEL", margin) where margin is in pixels
+    (positive = attacker nearer the goal line). See goal_depths.
+    """
+    d_att, d_def = goal_depths(goal_seg, inner_seg, [attacker, defender])
     margin = d_att - d_def
     if abs(margin) <= tolerance:
         return "LEVEL", margin
