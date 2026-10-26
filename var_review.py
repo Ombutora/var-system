@@ -13,9 +13,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import detection
 import geometry
 
 WINDOW = "VAR Review"
+DEFAULT_WEIGHTS = Path(__file__).resolve().parent / "models" / "yolo11n.pt"
 MODES = ["view", "line", "freehand", "calibrate", "offside"]
 SPEEDS = [0.1, 0.25, 0.5, 1.0, 2.0]
 MAX_ZOOM = 10.0
@@ -26,6 +28,8 @@ MARKUP = (255, 0, 255)
 CALIB = (0, 230, 255)
 ATTACKER = (40, 40, 235)
 DEFENDER = (235, 140, 30)
+PLAYER_BOX = (90, 220, 90)
+BALL = (0, 165, 255)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 
@@ -44,6 +48,9 @@ HELP = [
     "4 calibrate  2 clicks on the goal line, then 2 on the 6/18-yard line",
     "5 offside  left-click attacker, right-click 2nd-last defender",
     "           (click the ground point under the body part that counts)",
+    "v          player / ball detection on/off   p analyse whole clip",
+    "           (with detection on, offside clicks inside a player snap",
+    "            to their feet; hold Ctrl to place the point freely)",
     "u undo     x clear this frame    s save snapshot",
     "h help     q / esc quit",
 ]
@@ -191,6 +198,23 @@ def draw_markup(img, m, frame_w, frame_h, to_img, th, preview=None):
         cv2.line(img, to_img(preview[0]), to_img(preview[1]), preview[2], th, cv2.LINE_AA)
 
 
+def draw_detections(img, dets, trail, to_img, th):
+    for d in dets:
+        if d.kind == "player":
+            x1, y1, x2, y2 = d.box
+            cv2.rectangle(img, to_img((x1, y1)), to_img((x2, y2)), PLAYER_BOX, max(1, th // 2), cv2.LINE_AA)
+            cv2.circle(img, to_img(d.foot), th + 1, PLAYER_BOX, -1, cv2.LINE_AA)
+    if len(trail) > 1:
+        cv2.polylines(img, [np.array([to_img(p) for p in trail], np.int32)], False, BALL,
+                      max(1, th // 2), cv2.LINE_AA)
+    for d in dets:
+        if d.kind == "ball":
+            x1, y1, x2, y2 = d.box
+            c, r = to_img(d.center), to_img((x2, y2))
+            radius = max(th * 3, int(np.hypot(r[0] - c[0], r[1] - c[1])) + th)
+            cv2.circle(img, c, radius, BALL, th, cv2.LINE_AA)
+
+
 def verdict_style(verdict):
     name, margin = verdict
     color = {"OFFSIDE": ATTACKER, "ONSIDE": (60, 200, 60), "LEVEL": CALIB}[name]
@@ -198,8 +222,11 @@ def verdict_style(verdict):
 
 
 class VarApp:
-    def __init__(self, path, max_w, max_h):
+    def __init__(self, path, max_w, max_h, detect_opts=None):
         self.path = Path(path)
+        self.detect_opts = detect_opts or {}
+        self.detector = None
+        self.show_detect = False
         self.src = FrameSource(path)
         fw, fh = self.src.width, self.src.height
         self.base_scale = min(max_w / fw, max_h / fh)
@@ -286,6 +313,30 @@ class VarApp:
     def pause(self):
         self.playing = False
 
+    def ensure_detector(self):
+        if self.detector is None:
+            self.detector = detection.DetectionWorker(self.path, self.src.count, **self.detect_opts)
+            self.detector.start()
+        return self.detector
+
+    def detections(self):
+        """Detections for the frame on screen, or None while they're being computed."""
+        if not self.show_detect or self.detector is None:
+            return None
+        dets = self.detector.get(self.idx)
+        if dets is None:
+            self.detector.want(self.idx, self.frame)
+        return dets
+
+    def detect_status(self):
+        if not self.show_detect or self.detector is None:
+            return ""
+        d = self.detector
+        if d.status != "ready":
+            return f"  detect: {d.status}"
+        scan = f" analysing {d.analysed()}/{self.src.count}" if d.scanning else ""
+        return f"  detect: on{scan}"
+
     # ---- input --------------------------------------------------------------
 
     def on_mouse(self, event, x, y, flags, _param):
@@ -300,10 +351,10 @@ class VarApp:
             return
 
         if event == cv2.EVENT_LBUTTONDOWN:
-            self.left_down(x, y)
+            self.left_down(x, y, flags)
         elif event == cv2.EVENT_RBUTTONDOWN:
             if self.mode == "offside":
-                self.place_player("defender")
+                self.place_player("defender", flags)
             else:
                 self.drag = {"kind": "pan", "start": (x, y), "center": self.center.copy()}
         elif event == cv2.EVENT_MOUSEMOVE and self.drag:
@@ -311,7 +362,7 @@ class VarApp:
         elif event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP) and self.drag:
             self.drag_end()
 
-    def left_down(self, x, y):
+    def left_down(self, x, y, flags=0):
         if self.mode in ("line", "freehand", "calibrate", "offside"):
             self.pause()
         if self.mode == "view":
@@ -327,14 +378,22 @@ class VarApp:
                 self.current_markup(create=True).add_calib((self.pending_calib, self.mouse))
                 self.pending_calib = None
         elif self.mode == "offside":
-            self.place_player("attacker")
+            self.place_player("attacker", flags)
 
-    def place_player(self, role):
+    def place_player(self, role, flags=0):
         self.pause()
+        point, snapped = self.mouse, False
+        dets = self.detections()
+        if dets and not flags & cv2.EVENT_FLAG_CTRLKEY:
+            foot = detection.snap_to_player(self.mouse, dets)
+            if foot is not None:
+                point, snapped = foot, True
         m = self.current_markup(create=True)
-        m.set_player(role, self.mouse)
+        m.set_player(role, point)
         if len(m.calib) < 2:
             self.flash("Calibrate this frame (4) to draw offside lines")
+        elif snapped:
+            self.flash(f"{role.capitalize()} snapped to detected player's feet (Ctrl+click to place freely)")
 
     def drag_move(self, x, y):
         d = self.drag
@@ -403,6 +462,14 @@ class VarApp:
             self.markup.pop(self.idx, None)
             self.pending_calib = None
             self.flash("Cleared this frame")
+        elif ch == "v":
+            self.show_detect = not self.show_detect
+            if self.show_detect:
+                self.ensure_detector()
+        elif ch == "p":
+            self.show_detect = True
+            self.ensure_detector().scan(self.idx)
+            self.flash("Analysing the clip from this frame in the background")
         elif ch == "s":
             self.save_snapshot()
         elif ch == "h":
@@ -451,6 +518,10 @@ class VarApp:
         if self.drag and self.drag["kind"] == "free":
             draw = Markup(shapes=draw.shapes + [("free", self.drag["pts"])], calib=draw.calib,
                           attacker=draw.attacker, defender=draw.defender)
+        dets = self.detections()
+        if dets is not None:
+            trail = detection.ball_trail(self.detector.snapshot(), self.idx)
+            draw_detections(video, dets, trail, self.to_display, 2)
         draw_markup(video, draw, self.src.width, self.src.height, self.to_display, 2, self.preview())
 
         if m and m.verdict():
@@ -469,9 +540,14 @@ class VarApp:
         marked = "  [markup]" if m and not m.is_empty() else ""
         status = (f"{self.idx + 1}/{self.src.count}  {self.time_label(self.idx)}  "
                   f"{SPEEDS[self.speed_i]:g}x {state}  zoom {self.zoom:.1f}x  "
-                  f"mode: {MODES.index(self.mode) + 1} {self.mode}{marked}  (h help)")
+                  f"mode: {MODES.index(self.mode) + 1} {self.mode}{marked}{self.detect_status()}  (h help)")
         cv2.putText(strip, status, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1, cv2.LINE_AA)
-        hint = self.message if time.perf_counter() < self.message_until else self.mode_hint(m)
+        if self.detector is not None and self.detector.error and self.show_detect:
+            hint = f"Detection failed: {self.detector.error}"
+        elif time.perf_counter() < self.message_until:
+            hint = self.message
+        else:
+            hint = self.mode_hint(m)
         cv2.putText(strip, hint, (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, CALIB, 1, cv2.LINE_AA)
         return np.vstack([video, strip])
 
@@ -480,8 +556,11 @@ class VarApp:
         img = self.frame.copy()
         th = max(2, self.src.width // 600)
         m = self.current_markup() or Markup()
-        draw_markup(img, m, self.src.width, self.src.height,
-                    lambda p: (int(round(p[0])), int(round(p[1]))), th)
+        identity = lambda p: (int(round(p[0])), int(round(p[1])))  # noqa: E731
+        dets = self.detections()
+        if dets is not None:
+            draw_detections(img, dets, detection.ball_trail(self.detector.snapshot(), self.idx), identity, th)
+        draw_markup(img, m, self.src.width, self.src.height, identity, th)
         label = f"{self.path.name}  frame {self.idx + 1}  {self.time_label(self.idx)}"
         put_text(img, label, (15, img.shape[0] - 15), 0.4 + th * 0.15, WHITE, max(1, th // 2))
         if m.verdict():
@@ -526,6 +605,8 @@ class VarApp:
                 break
             if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
+        if self.detector is not None:
+            self.detector.stop()
         self.src.release()
         cv2.destroyAllWindows()
 
@@ -535,10 +616,20 @@ def main():
     ap.add_argument("video", help="path to any video file OpenCV can read (mp4, mkv, avi, mov...)")
     ap.add_argument("--max-width", type=int, default=1280, help="max display width (default 1280)")
     ap.add_argument("--max-height", type=int, default=720, help="max display height (default 720)")
+    ap.add_argument("--weights", default=str(DEFAULT_WEIGHTS),
+                    help="YOLO weights; downloaded automatically on first use (default models/yolo11n.pt)")
+    ap.add_argument("--imgsz", type=int, default=1280,
+                    help="detection input size; larger finds the small ball better but is slower (default 1280)")
+    ap.add_argument("--device", default=None, help="torch device, e.g. cpu or 0 for the first GPU (default: auto)")
+    ap.add_argument("--player-conf", type=float, default=0.35, help="min player confidence (default 0.35)")
+    ap.add_argument("--ball-conf", type=float, default=0.15, help="min ball confidence (default 0.15)")
     args = ap.parse_args()
     if not Path(args.video).is_file():
         raise SystemExit(f"No such file: {args.video}")
-    VarApp(args.video, args.max_width, args.max_height).run()
+    Path(args.weights).parent.mkdir(parents=True, exist_ok=True)
+    detect_opts = dict(weights=args.weights, imgsz=args.imgsz, device=args.device,
+                       player_conf=args.player_conf, ball_conf=args.ball_conf)
+    VarApp(args.video, args.max_width, args.max_height, detect_opts).run()
 
 
 if __name__ == "__main__":
