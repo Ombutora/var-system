@@ -6,6 +6,7 @@ A Video Assistant Referee review tool for football footage. Open any video file 
 - **Mark it up:** draw straight lines and freehand on any frame. Markup is saved per frame.
 - **Draw offside lines:** calibrate the frame's perspective from the pitch markings, then click the attacker and the second-last defender. You get true offside lines that follow the pitch's perspective, plus a verdict.
 - **Detect players and the ball automatically:** a pretrained YOLO model boxes every player and the ball and draws the ball's recent path. In offside mode, clicking a detected player snaps the point to their feet.
+- **Split players into teams by jersey colour:** each team's boxes are drawn in its shirt colour. Referees, goalkeepers and fans in the stands are shown in grey.
 - **Save snapshots:** full-resolution PNGs of the marked-up frame, written to `snapshots/`.
 
 ## Setup
@@ -43,6 +44,7 @@ Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the f
 | `5` offside | Left-click the attacker, right-click the second-last defender |
 | `v` | Turn player and ball detection on or off |
 | `p` | Analyse the whole clip in the background, starting from this frame |
+| `t` | Turn team colours on or off (also turns on detection) |
 | `Ctrl`+click | In offside mode, place the point exactly instead of snapping to a detected player |
 | `u` | Undo the last action on this frame |
 | `x` | Clear this frame's markup |
@@ -79,9 +81,27 @@ Detection runs on a background thread, so the window never freezes. The frame on
 **Limits:** the model is trained on general photos (the COCO "person" and "sports ball" classes), not football broadcasts.
 
 - It also boxes referees, coaches and fans near the pitch.
-- It does not tell teams apart.
 - In wide shots the ball is only a few pixels across, so it is often missed. Lowering `--ball-conf` finds more balls but adds false hits.
 - Ultralytics YOLO is licensed under AGPL-3.0.
+
+## Team detection
+
+Press `t` to show teams. Each player's box is drawn in their team's shirt colour with an **A** or **B** tag, and a legend appears at the top right. In offside mode, the message after a snap says which team the player is on.
+
+How it works (see `teams.py`):
+
+1. **Shirt colour:** for each player, the tool takes the median colour of the upper middle of the box (the shirt), ignoring grass pixels. It uses Lab colour space, so shadows and floodlights change the result less than the actual kit colour does.
+2. **On the pitch:** a player counts only if there's grass around their feet. This leaves out fans and staff in the stands.
+3. **Two clusters:** k-means groups the shirt colours into two teams. It then refits without outliers, so a referee doesn't pull a team's colour off. Anyone far from both team colours, such as referees and usually goalkeepers, is shown in grey.
+4. **More data over time:** the teams are learned from every analysed frame and refitted each time that number doubles. Team A keeps its name when this happens. Pressing `p` to analyse the clip makes the teams more stable.
+
+**Limits:**
+
+- The two teams need clearly different kits. Similar colours (e.g. dark navy vs black) can get mixed up.
+- A green kit is hard to tell apart from the grass.
+- Players hidden behind others may have the wrong colour, or no team if their feet are hidden.
+- A goalkeeper whose kit looks like one team's kit is put in that team.
+- "Team A" and "Team B" are only names. The tool doesn't know which side is attacking.
 
 ## Tests
 
@@ -89,4 +109,4 @@ Detection runs on a background thread, so the window never freezes. The frame on
 .venv\Scripts\python.exe -m pytest
 ```
 
-The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. The tests don't need the YOLO model.
+The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The tests don't need the YOLO model.
