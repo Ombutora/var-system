@@ -8,3 +8,5 @@ models/
 *.mkv
 *.avi
 *.mov
+*.var.json
+*.var.json.tmp

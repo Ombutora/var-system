@@ -5,6 +5,8 @@ Press h in the window for the controls.
 """
 
 import argparse
+import json
+import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
@@ -82,6 +84,20 @@ class Markup:
     ball_auto: bool = False  # ball point taken from detection rather than Shift+clicked
     history: list = field(default_factory=list)  # for undo
 
+    def to_json(self):
+        """Plain JSON data for the markup file. The undo history isn't saved."""
+        return {k: to_plain(getattr(self, k)) for k in self.SAVED_FIELDS}
+
+    @classmethod
+    def from_json(cls, data):
+        m = cls(**{k: data[k] for k in cls.SAVED_FIELDS if k in data})
+        m.shapes = [(kind, [tuple(p) for p in pts]) for kind, pts in m.shapes]
+        m.calib = [tuple(tuple(p) for p in seg) for seg in m.calib]
+        for k in ("attacker", "defender", "ball"):
+            if getattr(m, k) is not None:
+                setattr(m, k, tuple(getattr(m, k)))
+        return m
+
     def is_empty(self):
         return not (self.shapes or self.calib or self.attacker or self.defender or self.ball)
 
@@ -98,6 +114,7 @@ class Markup:
 
     PLAYER_FIELDS = ("attacker", "defender", "attacker_team", "defender_auto",
                      "attacker_auto", "attacker_rank", "attack_team_override", "ball", "ball_auto")
+    SAVED_FIELDS = ("shapes", "calib") + PLAYER_FIELDS  # what goes in the markup file
 
     def set_players(self, **changes):
         if all(getattr(self, k) == v for k, v in changes.items()):
@@ -130,6 +147,13 @@ class Markup:
             )
         except ValueError:
             return None
+
+
+def to_plain(v):
+    """Tuples to lists and numpy numbers to Python ones, so json can write them."""
+    if isinstance(v, (list, tuple)):
+        return [to_plain(x) for x in v]
+    return v.item() if isinstance(v, np.generic) else v
 
 
 class FrameSource:
@@ -274,7 +298,7 @@ def verdict_style(verdict):
 
 
 class VarApp:
-    def __init__(self, path, max_w, max_h, detect_opts=None):
+    def __init__(self, path, max_w, max_h, detect_opts=None, markup_path=None):
         self.path = Path(path)
         self.detect_opts = detect_opts or {}
         self.detector = None
@@ -296,9 +320,12 @@ class VarApp:
         self.playing = False
         self.speed_i = SPEEDS.index(1.0)
         self.mode = "view"
-        self.markup = {}  # frame index -> Markup
         self.show_help = False
         self.message, self.message_until = "", 0.0
+        # Markup is kept in a file next to the clip, so it survives closing the window
+        self.markup_path = Path(markup_path) if markup_path else self.path.with_name(self.path.name + ".var.json")
+        self.markup = self.load_markup()  # frame index -> Markup
+        self.saved_text = self.markup_text()
 
         self.zoom = 1.0
         self.center = np.array([fw / 2, fh / 2])
@@ -347,6 +374,46 @@ class VarApp:
         if m is None and create:
             m = self.markup[self.idx] = Markup()
         return m
+
+    def load_markup(self):
+        """Read this clip's markup file, if there is one. Returns {frame index: Markup}."""
+        try:
+            data = json.loads(self.markup_path.read_text(encoding="utf-8"))
+            markup = {int(i): Markup.from_json(d) for i, d in data["frames"].items()}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            # Don't overwrite a file we couldn't read: the markup in it may still be wanted
+            msg = f"Could not read {self.markup_path.name} ({e}): markup won't be saved this session"
+            print(msg)
+            self.flash(msg, 10)
+            self.markup_path = None
+            return {}
+        if markup:
+            print(f"Loaded markup for {len(markup)} frame(s) from {self.markup_path}")
+            self.flash(f"Loaded markup for {len(markup)} frame(s) from {self.markup_path.name}", 5)
+        return markup
+
+    def markup_text(self):
+        frames = {str(i): m.to_json() for i, m in sorted(self.markup.items()) if not m.is_empty()}
+        return json.dumps({"version": 1, "video": self.path.name, "frames": frames}, indent=1)
+
+    def save_markup(self):
+        """Write the markup file if anything changed since the last save. Returns True if it wrote."""
+        if self.markup_path is None:
+            return False
+        text = self.markup_text()
+        if text == self.saved_text:
+            return False
+        self.saved_text = text  # on failure, try again only after the next change
+        tmp = self.markup_path.with_name(self.markup_path.name + ".tmp")
+        try:  # write then rename, so a crash mid-write can't leave a half-written file
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self.markup_path)
+        except OSError as e:
+            self.flash(f"Could not save markup to {self.markup_path}: {e}", 5)
+            return False
+        return True
 
     def flash(self, text, seconds=2.5):
         self.message, self.message_until = text, time.perf_counter() + seconds
@@ -832,24 +899,33 @@ class VarApp:
               f"{self.src.fps:g} fps, {self.src.count} frames")
         print("\n".join(HELP))
 
-        next_t = time.perf_counter()
-        while True:
-            if self.seek is not None:
-                self.go_to(self.seek)
-                self.seek = None
-            now = time.perf_counter()
-            if self.playing and now >= next_t:
-                if self.idx >= self.src.count - 1 or not self.go_to(self.idx + 1):
-                    self.playing = False
-                next_t = now + 1.0 / (self.src.fps * SPEEDS[self.speed_i])
+        if self.markup_path is not None:
+            print(f"Markup is saved to {self.markup_path}")
 
-            cv2.imshow(WINDOW, self.render())
-            wait = max(1, int((next_t - time.perf_counter()) * 1000)) if self.playing else 20
-            key = cv2.waitKeyEx(wait)
-            if key != -1 and not self.handle_key(key):
-                break
-            if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
-                break
+        next_t = next_save = time.perf_counter()
+        try:
+            while True:
+                if self.seek is not None:
+                    self.go_to(self.seek)
+                    self.seek = None
+                now = time.perf_counter()
+                if self.playing and now >= next_t:
+                    if self.idx >= self.src.count - 1 or not self.go_to(self.idx + 1):
+                        self.playing = False
+                    next_t = now + 1.0 / (self.src.fps * SPEEDS[self.speed_i])
+                if now >= next_save:  # autosave, so a crash loses at most a second of work
+                    self.save_markup()
+                    next_save = now + 1.0
+
+                cv2.imshow(WINDOW, self.render())
+                wait = max(1, int((next_t - time.perf_counter()) * 1000)) if self.playing else 20
+                key = cv2.waitKeyEx(wait)
+                if key != -1 and not self.handle_key(key):
+                    break
+                if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+        finally:
+            self.save_markup()
         if self.detector is not None:
             self.detector.stop()
         self.src.release()
@@ -868,13 +944,15 @@ def main():
     ap.add_argument("--device", default=None, help="torch device, e.g. cpu or 0 for the first GPU (default: auto)")
     ap.add_argument("--player-conf", type=float, default=0.35, help="min player confidence (default 0.35)")
     ap.add_argument("--ball-conf", type=float, default=0.15, help="min ball confidence (default 0.15)")
+    ap.add_argument("--markup", default=None,
+                    help="markup file to load and save (default: <video>.var.json next to the video)")
     args = ap.parse_args()
     if not Path(args.video).is_file():
         raise SystemExit(f"No such file: {args.video}")
     Path(args.weights).parent.mkdir(parents=True, exist_ok=True)
     detect_opts = dict(weights=args.weights, imgsz=args.imgsz, device=args.device,
                        player_conf=args.player_conf, ball_conf=args.ball_conf)
-    VarApp(args.video, args.max_width, args.max_height, detect_opts).run()
+    VarApp(args.video, args.max_width, args.max_height, detect_opts, args.markup).run()
 
 
 if __name__ == "__main__":
