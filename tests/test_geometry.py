@@ -90,6 +90,13 @@ def test_second_last_defender_uses_pitch_depth_not_screen_position():
     assert geometry.second_last_defender(goal, inner, with_keeper, keeper_in_list=True) == 1
 
 
+def test_rank_by_depth_orders_nearest_goal_first():
+    goal, inner = segment(PERSPECTIVE, 0), segment(PERSPECTIVE, 16.5)
+    pts = [project(PERSPECTIVE, u, v) for u, v in [(14, 0), (6, 30), (25, -30), (9, -20)]]
+    assert geometry.rank_by_depth(goal, inner, pts) == [1, 3, 0, 2]
+    assert geometry.rank_by_depth(goal, inner, []) == []
+
+
 def test_second_last_defender_needs_enough_players():
     goal, inner = segment(PERSPECTIVE, 0), segment(PERSPECTIVE, 16.5)
     one = [project(PERSPECTIVE, 10, 0)]

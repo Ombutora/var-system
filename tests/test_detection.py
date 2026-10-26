@@ -2,8 +2,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from detection import (PERSON, SPORTS_BALL, Detection, ball_trail,  # noqa: E402
-                       parse_detections, snap_to_player)
+from detection import (PERSON, SPORTS_BALL, Detection, ball_carrier,  # noqa: E402
+                       ball_trail, parse_detections, snap_to_player)
 
 
 def test_parse_keeps_confident_players_and_best_ball():
@@ -32,6 +32,18 @@ def test_snap_picks_smallest_overlapping_player():
     assert snap_to_player((110, 110), [far, near, ball]) == near.foot
     assert snap_to_player((190, 60), [far, near]) == far.foot
     assert snap_to_player((5, 5), [far, near]) is None
+
+
+def test_ball_carrier_is_nearest_feet_within_reach():
+    near_cam = Detection("player", (100, 100, 160, 300), 0.9)  # 200 px tall, feet at (130, 300)
+    far = Detection("player", (400, 100, 410, 130), 0.9)  # 30 px tall, feet at (405, 130)
+    ball = lambda x, y: Detection("ball", (x - 3, y - 3, x + 3, y + 3), 0.5)  # noqa: E731
+    assert ball_carrier(ball(150, 290), [near_cam, far]) is near_cam
+    assert ball_carrier(ball(408, 128), [near_cam, far]) is far
+    # 60 px from the small far player's feet is two of his heights away: nobody has it
+    assert ball_carrier(ball(405, 190), [far]) is None
+    assert ball_carrier(None, [near_cam]) is None
+    assert ball_carrier(ball(0, 0), []) is None
 
 
 def test_ball_trail_skips_frames_without_ball():

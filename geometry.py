@@ -102,6 +102,14 @@ def goal_depths(goal_seg, inner_seg, points):
     return [depth_along(offside_line(p, vp), transversal, m_inner, toward_goal) for p in points]
 
 
+def rank_by_depth(goal_seg, inner_seg, points):
+    """Indices of `points`, nearest the goal line first."""
+    if not points:
+        return []
+    depths = goal_depths(goal_seg, inner_seg, points)
+    return [int(i) for i in np.argsort(depths, kind="stable")[::-1]]
+
+
 def second_last_defender(goal_seg, inner_seg, defenders, keeper_in_list=False):
     """Index into `defenders` (ground points) of the second-last defender, or None.
 
@@ -112,8 +120,7 @@ def second_last_defender(goal_seg, inner_seg, defenders, keeper_in_list=False):
     rank = 1 if keeper_in_list else 0
     if len(defenders) <= rank:
         return None
-    depths = goal_depths(goal_seg, inner_seg, defenders)
-    return int(np.argsort(depths)[::-1][rank])
+    return rank_by_depth(goal_seg, inner_seg, defenders)[rank]
 
 
 def offside_verdict(goal_seg, inner_seg, attacker, defender, tolerance=0.0):

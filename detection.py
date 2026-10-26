@@ -80,6 +80,24 @@ def snap_to_player(point, detections):
     return d.foot if d else None
 
 
+def ball_carrier(ball, players, max_box_heights=1.0):
+    """The player whose feet are nearest the ball, or None if nobody is close.
+
+    "Close" means within `max_box_heights` of that player's own box height,
+    so the limit scales with how near the camera the player is.
+    """
+    if ball is None or not players:
+        return None
+    bx, by = ball.center
+
+    def gap(p):
+        fx, fy = p.foot
+        return np.hypot(bx - fx, by - fy) / max(p.box[3] - p.box[1], 1.0)
+
+    best = min(players, key=gap)
+    return best if gap(best) <= max_box_heights else None
+
+
 def ball_trail(results, idx, length=25):
     """Ball centres over the last `length` frames that have been analysed."""
     trail = []
