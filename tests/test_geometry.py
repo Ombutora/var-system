@@ -90,6 +90,41 @@ def test_second_last_defender_uses_pitch_depth_not_screen_position():
     assert geometry.second_last_defender(goal, inner, with_keeper, keeper_in_list=True) == 1
 
 
+class TestBehindTheBall:
+    goal, inner = segment(PERSPECTIVE, 0), segment(PERSPECTIVE, 16.5)
+
+    def decide(self, att_u, def_u, ball_u=None, tolerance=0.0):
+        P = PERSPECTIVE
+        ball = project(P, ball_u, 0) if ball_u is not None else None
+        return geometry.offside_decision(self.goal, self.inner, project(P, att_u, 25),
+                                         project(P, def_u, -20), ball, tolerance)
+
+    def test_beyond_defender_but_behind_ball_is_onside(self):
+        # Cut-back: ball played from u=5, attacker at u=9 beyond the defender at u=10
+        verdict, margin, line = self.decide(9, 10, ball_u=5)
+        assert (verdict, line) == ("ONSIDE", "ball") and margin < 0
+
+    def test_beyond_both_is_offside(self):
+        verdict, margin, line = self.decide(9, 10, ball_u=20)
+        assert (verdict, line) == ("OFFSIDE", "defender") and margin > 0
+
+    def test_ball_line_sets_margin_when_ball_is_deeper(self):
+        verdict, margin, line = self.decide(4, 10, ball_u=6)
+        assert (verdict, line) == ("OFFSIDE", "ball")
+        _, margin_def, _ = self.decide(4, 10)
+        assert 0 < margin < margin_def  # measured from the ball, the nearer line
+
+    def test_level_with_ball_is_level(self):
+        verdict, _, line = self.decide(7, 10, ball_u=7, tolerance=0.5)
+        assert (verdict, line) == ("LEVEL", "ball")
+
+    def test_without_ball_matches_defender_only_verdict(self):
+        verdict, margin, line = self.decide(9, 10)
+        old = geometry.offside_verdict(self.goal, self.inner, project(PERSPECTIVE, 9, 25),
+                                       project(PERSPECTIVE, 10, -20))
+        assert (verdict, margin) == old and line == "defender"
+
+
 def test_rank_by_depth_orders_nearest_goal_first():
     goal, inner = segment(PERSPECTIVE, 0), segment(PERSPECTIVE, 16.5)
     pts = [project(PERSPECTIVE, u, v) for u, v in [(14, 0), (6, 30), (25, -30), (9, -20)]]

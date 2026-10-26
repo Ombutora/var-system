@@ -123,6 +123,30 @@ def second_last_defender(goal_seg, inner_seg, defenders, keeper_in_list=False):
     return rank_by_depth(goal_seg, inner_seg, defenders)[rank]
 
 
+def offside_decision(goal_seg, inner_seg, attacker, defender, ball=None, tolerance=0.0):
+    """Offside position under Law 11, including the "behind the ball" exception.
+
+    An attacker is in an offside position only if nearer the goal line than
+    both the ball and the second-last defender, so the offside line is
+    whichever of the two is nearer the goal line. Level with it is onside.
+
+    ball -- the ball's ground point, or None to judge against the defender only
+
+    Returns (verdict, margin, line) where verdict is "OFFSIDE" | "ONSIDE" | "LEVEL",
+    margin is pixels beyond the offside line (positive = nearer the goal line), and
+    line is "defender" or "ball": which one set the offside line.
+    """
+    points = [attacker, defender] + ([ball] if ball is not None else [])
+    depths = goal_depths(goal_seg, inner_seg, points)
+    d_att, d_line, line = depths[0], depths[1], "defender"
+    if ball is not None and depths[2] > d_line:
+        d_line, line = depths[2], "ball"
+    margin = d_att - d_line
+    if abs(margin) <= tolerance:
+        return "LEVEL", margin, line
+    return ("OFFSIDE" if margin > 0 else "ONSIDE"), margin, line
+
+
 def offside_verdict(goal_seg, inner_seg, attacker, defender, tolerance=0.0):
     """Compare an attacker and the second-last defender against the goal line.
 

@@ -7,7 +7,7 @@ Press h in the window for the controls.
 import argparse
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import cv2
@@ -50,6 +50,7 @@ HELP = [
     "4 calibrate  2 clicks on the goal line, then 2 on the 6/18-yard line",
     "5 offside  left-click attacker, right-click 2nd-last defender",
     "           (click the ground point under the body part that counts)",
+    "           Shift+click: the ball's ground point (behind-the-ball rule)",
     "v          player / ball detection on/off   p analyse whole clip",
     "t          teams by jersey colour on/off (grey = referee/keeper/other)",
     "o          full auto offside check: attacking team from the ball,",
@@ -77,10 +78,12 @@ class Markup:
     attacker_auto: bool = False  # attacker chosen automatically (o)
     attacker_rank: int = 0  # which auto attacker: 0 = most advanced (n cycles)
     attack_team_override: str = None  # attacking team chosen with m instead of from the ball
+    ball: tuple = None  # the ball's ground point, for the behind-the-ball exception
+    ball_auto: bool = False  # ball point taken from detection rather than Shift+clicked
     history: list = field(default_factory=list)  # for undo
 
     def is_empty(self):
-        return not (self.shapes or self.calib or self.attacker or self.defender)
+        return not (self.shapes or self.calib or self.attacker or self.defender or self.ball)
 
     def add_shape(self, shape):
         self.shapes.append(shape)
@@ -94,7 +97,7 @@ class Markup:
         self.history.append(("calib", None))
 
     PLAYER_FIELDS = ("attacker", "defender", "attacker_team", "defender_auto",
-                     "attacker_auto", "attacker_rank", "attack_team_override")
+                     "attacker_auto", "attacker_rank", "attack_team_override", "ball", "ball_auto")
 
     def set_players(self, **changes):
         if all(getattr(self, k) == v for k, v in changes.items()):
@@ -122,8 +125,8 @@ class Markup:
         if len(self.calib) < 2 or self.attacker is None or self.defender is None:
             return None
         try:
-            return geometry.offside_verdict(
-                self.calib[0], self.calib[1], self.attacker, self.defender, tolerance=0.5
+            return geometry.offside_decision(
+                self.calib[0], self.calib[1], self.attacker, self.defender, self.ball, tolerance=0.5
             )
         except ValueError:
             return None
@@ -205,7 +208,9 @@ def draw_markup(img, m, frame_w, frame_h, to_img, th, preview=None):
 
     def_label = "DEF (auto)" if m.defender_auto else "DEF"
     att_label = "ATT (auto)" if m.attacker_auto else "ATT"
-    for point, color, label in ((m.attacker, ATTACKER, att_label), (m.defender, DEFENDER, def_label)):
+    ball_label = "BALL (auto)" if m.ball_auto else "BALL"
+    for point, color, label in ((m.ball, BALL, ball_label), (m.attacker, ATTACKER, att_label),
+                                (m.defender, DEFENDER, def_label)):
         if point is None:
             continue
         if vp is not None:
@@ -260,8 +265,11 @@ def draw_detections(img, dets, trail, to_img, th, team_of=None):
 
 
 def verdict_style(verdict):
-    name, margin = verdict
+    name, margin, line = verdict
     color = {"OFFSIDE": ATTACKER, "ONSIDE": (60, 200, 60), "LEVEL": CALIB}[name]
+    if line == "ball":  # the ball was nearer the goal line than the defender
+        name = {"OFFSIDE": "OFFSIDE (beyond the ball)", "ONSIDE": "ONSIDE - behind the ball",
+                "LEVEL": "LEVEL with the ball"}[name]
     return f"{name}  ({margin:+.1f} px)", color
 
 
@@ -450,7 +458,10 @@ class VarApp:
                 self.current_markup(create=True).add_calib((self.pending_calib, self.mouse))
                 self.pending_calib = None
         elif self.mode == "offside":
-            self.place_player("attacker", flags)
+            if flags & cv2.EVENT_FLAG_SHIFTKEY:
+                self.place_ball()
+            else:
+                self.place_player("attacker", flags)
 
     def teams_ready(self):
         return self.show_teams and self.teams.fitted
@@ -474,12 +485,39 @@ class VarApp:
         # The team comes from the player clicked on, even with Ctrl (exact placement)
         team = self.team_of(player)[0] if player is not None and self.teams_ready() else None
         m.set_players(attacker=point, attacker_team=team, attacker_auto=False)
+        ball_msg = self.auto_ball(m, dets) if dets is not None else ""
         if len(m.calib) < 2:
             self.flash("Calibrate this frame (4) to draw offside lines")
         elif m.defender is None or m.defender_auto:
-            self.flash(self.auto_defender(m))
+            self.flash(f"{self.auto_defender(m)} {ball_msg}".strip(), 5)
         elif snap:
-            self.flash("Attacker snapped to player's feet (Ctrl+click to place freely)")
+            self.flash(f"Attacker snapped to player's feet (Ctrl+click to place freely). {ball_msg}".strip())
+
+    def place_ball(self):
+        self.pause()
+        m = self.current_markup(create=True)
+        m.set_players(ball=self.mouse, ball_auto=False)
+        self.flash("Ball's ground point set: attackers level with or behind it are onside")
+
+    def auto_ball(self, m, dets):
+        """Take the ball's ground point from detection if it is at a player's feet. Returns a short message.
+
+        A ball in the air can't be placed on the pitch from its box alone (its
+        ground point is somewhere below it), so it is left for a Shift+click.
+        """
+        if m.ball is not None and not m.ball_auto:
+            return "Ball: your point."
+        ball = next((d for d in dets if d.kind == "ball"), None)
+        carrier = detection.ball_carrier(ball, [d for d in dets if d.kind == "player"])
+        if carrier is not None:
+            x1, _, x2, y2 = ball.box
+            m.set_players(ball=((x1 + x2) / 2, y2), ball_auto=True)
+            return "Ball: auto."
+        if m.ball_auto:  # the detected ball is gone or no longer at anyone's feet
+            m.set_players(ball=None, ball_auto=False)
+        if ball is None:
+            return "Ball: not found (Shift+click under it)."
+        return "Ball: in the air? Shift+click under it."
 
     def auto_attacker(self, m, rank=0, team_override=None):
         """Pick the attacking team and the attacker to check, then the defender. Returns a message.
@@ -528,7 +566,7 @@ class VarApp:
         if m.defender is None or m.defender_auto:
             d_msg = self.auto_defender(m)
             msg += " Defender: auto." if m.defender_auto else f" {d_msg}"
-        return msg
+        return f"{msg} {self.auto_ball(m, dets)}"
 
     def auto_defender(self, m):
         """Place the second-last defender automatically. Returns a message saying what happened."""
@@ -712,9 +750,7 @@ class VarApp:
         m = self.current_markup()
         draw = m or Markup()
         if self.drag and self.drag["kind"] == "free":
-            draw = Markup(shapes=draw.shapes + [("free", self.drag["pts"])], calib=draw.calib,
-                          attacker=draw.attacker, defender=draw.defender,
-                          defender_auto=draw.defender_auto, attacker_auto=draw.attacker_auto)
+            draw = replace(draw, shapes=draw.shapes + [("free", self.drag["pts"])])
         dets = self.detections()
         self.update_teams()
         team_of = self.team_of if self.show_teams and self.teams.fitted else None
