@@ -52,6 +52,9 @@ HELP = [
     "           (click the ground point under the body part that counts)",
     "v          player / ball detection on/off   p analyse whole clip",
     "t          teams by jersey colour on/off (grey = referee/keeper/other)",
+    "o          full auto offside check: attacking team from the ball,",
+    "           most advanced attacker, second-last defender (needs teams)",
+    "n          next attacker    m switch attacking team",
     "f          find the second-last defender automatically (needs teams)",
     "g          keeper rule: keeper in team colours or not",
     "           (with detection on, offside clicks inside a player snap",
@@ -71,6 +74,9 @@ class Markup:
     defender: tuple = None
     attacker_team: str = None  # "A" / "B" when the attacker was clicked on a detected player
     defender_auto: bool = False  # defender chosen automatically rather than clicked
+    attacker_auto: bool = False  # attacker chosen automatically (o)
+    attacker_rank: int = 0  # which auto attacker: 0 = most advanced (n cycles)
+    attack_team_override: str = None  # attacking team chosen with m instead of from the ball
     history: list = field(default_factory=list)  # for undo
 
     def is_empty(self):
@@ -87,9 +93,12 @@ class Markup:
         self.calib.append(seg)
         self.history.append(("calib", None))
 
-    PLAYER_FIELDS = ("attacker", "defender", "attacker_team", "defender_auto")
+    PLAYER_FIELDS = ("attacker", "defender", "attacker_team", "defender_auto",
+                     "attacker_auto", "attacker_rank", "attack_team_override")
 
     def set_players(self, **changes):
+        if all(getattr(self, k) == v for k, v in changes.items()):
+            return  # nothing changes, so nothing to undo
         self.history.append(("players", {k: getattr(self, k) for k in self.PLAYER_FIELDS}))
         for k, v in changes.items():
             setattr(self, k, v)
@@ -195,7 +204,8 @@ def draw_markup(img, m, frame_w, frame_h, to_img, th, preview=None):
             vp = None
 
     def_label = "DEF (auto)" if m.defender_auto else "DEF"
-    for point, color, label in ((m.attacker, ATTACKER, "ATT"), (m.defender, DEFENDER, def_label)):
+    att_label = "ATT (auto)" if m.attacker_auto else "ATT"
+    for point, color, label in ((m.attacker, ATTACKER, att_label), (m.defender, DEFENDER, def_label)):
         if point is None:
             continue
         if vp is not None:
@@ -463,13 +473,62 @@ class VarApp:
 
         # The team comes from the player clicked on, even with Ctrl (exact placement)
         team = self.team_of(player)[0] if player is not None and self.teams_ready() else None
-        m.set_players(attacker=point, attacker_team=team)
+        m.set_players(attacker=point, attacker_team=team, attacker_auto=False)
         if len(m.calib) < 2:
             self.flash("Calibrate this frame (4) to draw offside lines")
         elif m.defender is None or m.defender_auto:
             self.flash(self.auto_defender(m))
         elif snap:
             self.flash("Attacker snapped to player's feet (Ctrl+click to place freely)")
+
+    def auto_attacker(self, m, rank=0, team_override=None):
+        """Pick the attacking team and the attacker to check, then the defender. Returns a message.
+
+        The attacking team is the team of the player nearest the ball (the
+        passer, at the moment of the pass) unless chosen with m. Attackers are
+        ranked nearest the goal line first, leaving out the passer, who can't be
+        offside from their own pass. Rank 0, the most advanced, is the one to
+        check: if they are onside, every attacker is.
+        """
+        if len(m.calib) < 2:
+            return "Calibrate this frame (4) first"
+        if not self.teams_ready():
+            return "Turn on teams (t) for the automatic offside check"
+        dets = self.detections()
+        if dets is None:
+            return "Detections not ready yet: press o again in a moment"
+
+        in_team = [(d, self.team_of(d)[0]) for d in dets if d.kind == "player"]
+        in_team = [(d, t) for d, t in in_team if t in teams.TEAM_LABELS]
+        ball = next((d for d in dets if d.kind == "ball"), None)
+        carrier = detection.ball_carrier(ball, [d for d, _ in in_team])
+
+        override = team_override or m.attack_team_override
+        if override:
+            team, why = override, "chosen with m"
+        elif carrier is not None:
+            team, why = self.team_of(carrier)[0], "has the ball"
+        else:
+            reason = "ball not detected" if ball is None else "no player next to the ball"
+            return f"Can't tell which team is attacking ({reason}): press m to choose"
+
+        attackers = [d for d, t in in_team if t == team and d is not carrier]
+        if not attackers:
+            return f"No team {team} attackers visible apart from the ball carrier"
+        try:
+            order = geometry.rank_by_depth(m.calib[0], m.calib[1], [d.foot for d in attackers])
+        except ValueError:
+            return "Calibration lines are invalid: recalibrate (4)"
+        rank %= len(order)
+        m.set_players(attacker=attackers[order[rank]].foot, attacker_team=team, attacker_auto=True,
+                      attacker_rank=rank, attack_team_override=override)
+
+        which = "most advanced" if rank == 0 else f"{rank + 1} of {len(order)}"
+        msg = f"Team {team} attacking ({why}). Attacker: {which} (n next, m switch team)."
+        if m.defender is None or m.defender_auto:
+            d_msg = self.auto_defender(m)
+            msg += " Defender: auto." if m.defender_auto else f" {d_msg}"
+        return msg
 
     def auto_defender(self, m):
         """Place the second-last defender automatically. Returns a message saying what happened."""
@@ -573,6 +632,23 @@ class VarApp:
             if self.show_teams and not self.show_detect:
                 self.show_detect = True
                 self.ensure_detector()
+        elif ch == "o":
+            self.pause()
+            self.mode = "offside"
+            self.flash(self.auto_attacker(self.current_markup(create=True)), 5)
+        elif ch == "n":
+            m = self.current_markup()
+            if m and m.attacker_auto:
+                self.flash(self.auto_attacker(m, rank=m.attacker_rank + 1), 5)
+            else:
+                self.flash("Press o first to pick the attacker automatically")
+        elif ch == "m":
+            self.pause()
+            self.mode = "offside"
+            m = self.current_markup(create=True)
+            current = m.attacker_team if m.attacker_team in teams.TEAM_LABELS else teams.TEAM_LABELS[1]
+            other = teams.TEAM_LABELS[1 - teams.TEAM_LABELS.index(current)]
+            self.flash(self.auto_attacker(m, team_override=other), 5)
         elif ch == "f":
             self.pause()
             self.flash(self.auto_defender(self.current_markup(create=True)))
@@ -617,7 +693,7 @@ class VarApp:
         if n < 2:
             return "Calibrate this frame first (press 4)"
         if self.teams_ready():
-            return "Left-click the attacker: the second-last defender is found automatically"
+            return "Press o for a full auto check, or left-click the attacker (defender found automatically)"
         return "Left-click attacker, right-click second-last defender (ground point)"
 
     def preview(self):
@@ -638,7 +714,7 @@ class VarApp:
         if self.drag and self.drag["kind"] == "free":
             draw = Markup(shapes=draw.shapes + [("free", self.drag["pts"])], calib=draw.calib,
                           attacker=draw.attacker, defender=draw.defender,
-                          defender_auto=draw.defender_auto)
+                          defender_auto=draw.defender_auto, attacker_auto=draw.attacker_auto)
         dets = self.detections()
         self.update_teams()
         team_of = self.team_of if self.show_teams and self.teams.fitted else None
