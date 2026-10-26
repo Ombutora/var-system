@@ -2,6 +2,8 @@
 __pycache__/
 .pytest_cache/
 snapshots/
+models/
+*.pt
 *.mp4
 *.mkv
 *.avi
