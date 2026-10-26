@@ -8,6 +8,7 @@ A Video Assistant Referee review tool for football footage. Open any video file 
 - **Detect players and the ball automatically:** a pretrained YOLO model boxes every player and the ball and draws the ball's recent path. In offside mode, clicking a detected player snaps the point to their feet.
 - **Split players into teams by jersey colour:** each team's boxes are drawn in its shirt colour. Referees, goalkeepers and fans in the stands are shown in grey.
 - **Find the second-last defender automatically:** click the attacker, and the tool works out the defending team and draws the defender's offside line.
+- **Run a fully automatic offside check:** one key works out the attacking team from who has the ball, picks the most advanced attacker and the second-last defender, and gives the verdict.
 - **Save snapshots:** full-resolution PNGs of the marked-up frame, written to `snapshots/`.
 
 ## Setup
@@ -46,6 +47,9 @@ Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the f
 | `v` | Turn player and ball detection on or off |
 | `p` | Analyse the whole clip in the background, starting from this frame |
 | `t` | Turn team colours on or off (also turns on detection) |
+| `o` | Fully automatic offside check: attacking team, attacker and defender (needs teams) |
+| `n` | Next attacker: check the next most advanced attacker |
+| `m` | Switch the attacking team |
 | `f` | Find the second-last defender automatically (needs teams) |
 | `g` | Switch the keeper rule: keeper wears team colours, or not (default) |
 | `Ctrl`+click | In offside mode, place the point exactly instead of snapping to a detected player |
@@ -61,7 +65,7 @@ Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the f
 3. Press `5`. Left-click the **ground point directly under** the attacker's furthest-forward body part that can score (not hands or arms), then right-click the same for the second-last defender. Clicking again moves a player.
 4. Read the verdict at the top left and press `s` to save the evidence.
 
-With teams on (`t`), step 3 is a single click. Left-click the attacker, and the defender line is placed for you (see below).
+With teams on (`t`), step 3 is a single click. Left-click the attacker, and the defender line is placed for you. Or press `o`, and both players are chosen for you (see below).
 
 ### How it works
 
@@ -130,10 +134,30 @@ With the frame calibrated and teams on, left-click inside the attacker's box. Th
 
 **It can only rank players who were detected and assigned to a team.** If the real second-last defender is hidden, merged with another player's box, or shown grey, the tool picks someone else. Always check the pick before trusting the verdict.
 
+## Fully automatic offside check
+
+On the frame where the ball is played, calibrate (`4`), turn on teams (`t`) and press **`o`**:
+
+1. **Attacking team:** the team of the player whose feet are nearest the ball. At the moment of the pass, that's the passer. "Nearest" has a limit based on that player's size on screen, so a ball in the air or out of reach doesn't count.
+2. **Attacker:** every attacking player is ranked by distance to the goal line, measured in the pitch's perspective. The passer is left out, because a player can't be offside from their own pass. The **most advanced** attacker is checked first: if they're onside, every attacker is. Their line is labelled **ATT (auto)**.
+3. **Defender:** the second-last defender is found as described above, unless you've already set one by hand.
+
+**When to step in:**
+
+- **`n`** moves to the next most advanced attacker, wrapping round at the end. Use it when the player who actually receives the ball isn't the one furthest forward. Only the attacker who becomes involved in play can be penalised.
+- **`m`** switches the attacking team, and the choice stays for this frame. Use it when the ball isn't detected (common in wide shots), when no player is close enough to it, or when the nearest player is a defender. The tool always attacks the goal you calibrated on, so if the defending team has the ball, there's no offside to check at that goal.
+- A left-click on any player replaces the auto attacker. Undo steps back one change at a time.
+
+**Limits:**
+
+- The pick is only as good as the ball and player detection and the team colours.
+- An attacker who wasn't detected or got no team is never considered.
+- The tool doesn't apply the "behind the ball" exception. An attacker level with or behind the ball when it's played is onside, whatever the line shows.
+
 ## Tests
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The auto-defender tests run the app with a fake detector. They cover picking by pitch depth, the keeper rule, manual overrides, Ctrl+click and undo. The tests don't need the YOLO model.
+The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The auto-defender and auto-attacker tests run the app with a fake detector (see `tests/conftest.py`). They cover picking by pitch depth, the keeper rule, finding the ball carrier, leaving out the passer, cycling attackers, switching teams, manual overrides, Ctrl+click and undo. The tests don't need the YOLO model.
