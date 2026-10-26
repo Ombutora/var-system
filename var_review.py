@@ -15,6 +15,7 @@ import numpy as np
 
 import detection
 import geometry
+import teams
 
 WINDOW = "VAR Review"
 DEFAULT_WEIGHTS = Path(__file__).resolve().parent / "models" / "yolo11n.pt"
@@ -29,6 +30,7 @@ CALIB = (0, 230, 255)
 ATTACKER = (40, 40, 235)
 DEFENDER = (235, 140, 30)
 PLAYER_BOX = (90, 220, 90)
+OTHER_PERSON = (150, 150, 150)  # referees, goalkeepers, fans when teams are shown
 BALL = (0, 165, 255)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -49,6 +51,7 @@ HELP = [
     "5 offside  left-click attacker, right-click 2nd-last defender",
     "           (click the ground point under the body part that counts)",
     "v          player / ball detection on/off   p analyse whole clip",
+    "t          teams by jersey colour on/off (grey = referee/keeper/other)",
     "           (with detection on, offside clicks inside a player snap",
     "            to their feet; hold Ctrl to place the point freely)",
     "u undo     x clear this frame    s save snapshot",
@@ -198,12 +201,34 @@ def draw_markup(img, m, frame_w, frame_h, to_img, th, preview=None):
         cv2.line(img, to_img(preview[0]), to_img(preview[1]), preview[2], th, cv2.LINE_AA)
 
 
-def draw_detections(img, dets, trail, to_img, th):
+def contrast(color):
+    """Black or white, whichever reads better against a BGR colour."""
+    return BLACK if 0.114 * color[0] + 0.587 * color[1] + 0.299 * color[2] > 140 else WHITE
+
+
+def draw_tag(img, text, corner, color, th):
+    """Small filled label in a team's colour, with readable text on top."""
+    scale = 0.35 + th * 0.1
+    (w, h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+    x, y = corner
+    cv2.rectangle(img, (x - 1, y - h - 7), (x + w + 7, y + 1), contrast(color), -1)
+    cv2.rectangle(img, (x, y - h - 6), (x + w + 6, y), color, -1)
+    cv2.putText(img, text, (x + 3, y - 3), cv2.FONT_HERSHEY_SIMPLEX, scale, contrast(color), 1, cv2.LINE_AA)
+
+
+def draw_detections(img, dets, trail, to_img, th, team_of=None):
+    """team_of(detection) -> (label, colour), or None to draw plain player boxes."""
     for d in dets:
         if d.kind == "player":
+            label, color = team_of(d) if team_of else (None, PLAYER_BOX)
             x1, y1, x2, y2 = d.box
-            cv2.rectangle(img, to_img((x1, y1)), to_img((x2, y2)), PLAYER_BOX, max(1, th // 2), cv2.LINE_AA)
-            cv2.circle(img, to_img(d.foot), th + 1, PLAYER_BOX, -1, cv2.LINE_AA)
+            tl, br = to_img((x1, y1)), to_img((x2, y2))
+            if label:  # contrasting outline so dark or pale kits still show up
+                cv2.rectangle(img, tl, br, contrast(color), max(1, th // 2) + 2, cv2.LINE_AA)
+            cv2.rectangle(img, tl, br, color, max(1, th // 2), cv2.LINE_AA)
+            cv2.circle(img, to_img(d.foot), th + 1, color, -1, cv2.LINE_AA)
+            if label and label != teams.OTHER:
+                draw_tag(img, label, tl, color, th)
     if len(trail) > 1:
         cv2.polylines(img, [np.array([to_img(p) for p in trail], np.int32)], False, BALL,
                       max(1, th // 2), cv2.LINE_AA)
@@ -227,6 +252,9 @@ class VarApp:
         self.detect_opts = detect_opts or {}
         self.detector = None
         self.show_detect = False
+        self.teams = teams.TeamClassifier()
+        self.show_teams = False
+        self.teams_fit_at = 0  # analysed-frame count at the last fit
         self.src = FrameSource(path)
         fw, fh = self.src.width, self.src.height
         self.base_scale = min(max_w / fw, max_h / fh)
@@ -328,6 +356,27 @@ class VarApp:
             self.detector.want(self.idx, self.frame)
         return dets
 
+    def update_teams(self):
+        """Fit the jersey clusters, and refit as more frames are analysed (each time the count doubles)."""
+        if not (self.show_teams and self.show_detect and self.detector):
+            return
+        n = self.detector.analysed()
+        if n == 0 or (self.teams.fitted and n < 2 * self.teams_fit_at) or n == self.teams_fit_at:
+            return
+        players = [d for dets in self.detector.snapshot().values() for d in dets
+                   if d.kind == "player" and d.lab is not None]
+        on_pitch = [d for d in players if d.on_pitch]
+        if len(on_pitch) >= teams.MIN_PLAYERS:  # else the pitch may not be green: use everyone
+            players = on_pitch
+        if len(players) > 3000:  # plenty for two clusters; keep refits instant
+            players = [players[i] for i in np.random.default_rng(0).choice(len(players), 3000, replace=False)]
+        self.teams.fit([p.lab for p in players], [p.bgr for p in players])
+        self.teams_fit_at = n  # also on failure, so we only retry once more frames arrive
+
+    def team_of(self, d):
+        label = self.teams.classify(d.lab) if d.on_pitch else teams.OTHER
+        return label, self.teams.color(label) or OTHER_PERSON
+
     def detect_status(self):
         if not self.show_detect or self.detector is None:
             return ""
@@ -335,7 +384,10 @@ class VarApp:
         if d.status != "ready":
             return f"  detect: {d.status}"
         scan = f" analysing {d.analysed()}/{self.src.count}" if d.scanning else ""
-        return f"  detect: on{scan}"
+        team = ""
+        if self.show_teams:
+            team = "  teams: on" if self.teams.fitted else "  teams: need more players"
+        return f"  detect: on{scan}{team}"
 
     # ---- input --------------------------------------------------------------
 
@@ -382,18 +434,22 @@ class VarApp:
 
     def place_player(self, role, flags=0):
         self.pause()
-        point, snapped = self.mouse, False
+        point, player = self.mouse, None
         dets = self.detections()
         if dets and not flags & cv2.EVENT_FLAG_CTRLKEY:
-            foot = detection.snap_to_player(self.mouse, dets)
-            if foot is not None:
-                point, snapped = foot, True
+            player = detection.player_at(self.mouse, dets)
+            if player is not None:
+                point = player.foot
         m = self.current_markup(create=True)
         m.set_player(role, point)
         if len(m.calib) < 2:
             self.flash("Calibrate this frame (4) to draw offside lines")
-        elif snapped:
-            self.flash(f"{role.capitalize()} snapped to detected player's feet (Ctrl+click to place freely)")
+        elif player is not None:
+            who = "player"
+            if self.show_teams and self.teams.fitted:
+                team = self.team_of(player)[0]
+                who = f"team {team} player" if team != teams.OTHER else "player (no team)"
+            self.flash(f"{role.capitalize()} snapped to {who}'s feet (Ctrl+click to place freely)")
 
     def drag_move(self, x, y):
         d = self.drag
@@ -466,6 +522,11 @@ class VarApp:
             self.show_detect = not self.show_detect
             if self.show_detect:
                 self.ensure_detector()
+        elif ch == "t":
+            self.show_teams = not self.show_teams
+            if self.show_teams and not self.show_detect:
+                self.show_detect = True
+                self.ensure_detector()
         elif ch == "p":
             self.show_detect = True
             self.ensure_detector().scan(self.idx)
@@ -519,9 +580,19 @@ class VarApp:
             draw = Markup(shapes=draw.shapes + [("free", self.drag["pts"])], calib=draw.calib,
                           attacker=draw.attacker, defender=draw.defender)
         dets = self.detections()
+        self.update_teams()
+        team_of = self.team_of if self.show_teams and self.teams.fitted else None
         if dets is not None:
             trail = detection.ball_trail(self.detector.snapshot(), self.idx)
-            draw_detections(video, dets, trail, self.to_display, 2)
+            draw_detections(video, dets, trail, self.to_display, 2, team_of)
+        if team_of:
+            x = self.disp_w - 10
+            for label in reversed(teams.TEAM_LABELS):
+                text = f"Team {label}"
+                w = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0][0] + 6
+                x -= w
+                draw_tag(video, text, (x, 30), self.teams.color(label), 2)
+                x -= 8
         draw_markup(video, draw, self.src.width, self.src.height, self.to_display, 2, self.preview())
 
         if m and m.verdict():
@@ -559,7 +630,9 @@ class VarApp:
         identity = lambda p: (int(round(p[0])), int(round(p[1])))  # noqa: E731
         dets = self.detections()
         if dets is not None:
-            draw_detections(img, dets, detection.ball_trail(self.detector.snapshot(), self.idx), identity, th)
+            team_of = self.team_of if self.show_teams and self.teams.fitted else None
+            draw_detections(img, dets, detection.ball_trail(self.detector.snapshot(), self.idx),
+                            identity, th, team_of)
         draw_markup(img, m, self.src.width, self.src.height, identity, th)
         label = f"{self.path.name}  frame {self.idx + 1}  {self.time_label(self.idx)}"
         put_text(img, label, (15, img.shape[0] - 15), 0.4 + th * 0.15, WHITE, max(1, th // 2))
