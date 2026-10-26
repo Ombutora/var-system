@@ -52,6 +52,8 @@ HELP = [
     "           (click the ground point under the body part that counts)",
     "v          player / ball detection on/off   p analyse whole clip",
     "t          teams by jersey colour on/off (grey = referee/keeper/other)",
+    "f          find the second-last defender automatically (needs teams)",
+    "g          keeper rule: keeper in team colours or not",
     "           (with detection on, offside clicks inside a player snap",
     "            to their feet; hold Ctrl to place the point freely)",
     "u undo     x clear this frame    s save snapshot",
@@ -67,6 +69,8 @@ class Markup:
     calib: list = field(default_factory=list)  # up to two segments
     attacker: tuple = None
     defender: tuple = None
+    attacker_team: str = None  # "A" / "B" when the attacker was clicked on a detected player
+    defender_auto: bool = False  # defender chosen automatically rather than clicked
     history: list = field(default_factory=list)  # for undo
 
     def is_empty(self):
@@ -83,9 +87,12 @@ class Markup:
         self.calib.append(seg)
         self.history.append(("calib", None))
 
-    def set_player(self, role, point):
-        self.history.append((role, getattr(self, role)))
-        setattr(self, role, point)
+    PLAYER_FIELDS = ("attacker", "defender", "attacker_team", "defender_auto")
+
+    def set_players(self, **changes):
+        self.history.append(("players", {k: getattr(self, k) for k in self.PLAYER_FIELDS}))
+        for k, v in changes.items():
+            setattr(self, k, v)
 
     def undo(self):
         if not self.history:
@@ -97,8 +104,9 @@ class Markup:
             self.calib.pop()
             if self.history and self.history[-1][0] == "calib_reset":
                 self.calib = self.history.pop()[1]
-        elif kind in ("attacker", "defender"):
-            setattr(self, kind, prev)
+        elif kind == "players":
+            for k, v in prev.items():
+                setattr(self, k, v)
         return True
 
     def verdict(self):
@@ -186,7 +194,8 @@ def draw_markup(img, m, frame_w, frame_h, to_img, th, preview=None):
         except ValueError:
             vp = None
 
-    for point, color, label in ((m.attacker, ATTACKER, "ATT"), (m.defender, DEFENDER, "DEF")):
+    def_label = "DEF (auto)" if m.defender_auto else "DEF"
+    for point, color, label in ((m.attacker, ATTACKER, "ATT"), (m.defender, DEFENDER, def_label)):
         if point is None:
             continue
         if vp is not None:
@@ -255,6 +264,7 @@ class VarApp:
         self.teams = teams.TeamClassifier()
         self.show_teams = False
         self.teams_fit_at = 0  # analysed-frame count at the last fit
+        self.keeper_in_team = False  # keeper's kit matches the outfield players'
         self.src = FrameSource(path)
         fw, fh = self.src.width, self.src.height
         self.base_scale = min(max_w / fw, max_h / fh)
@@ -432,24 +442,60 @@ class VarApp:
         elif self.mode == "offside":
             self.place_player("attacker", flags)
 
+    def teams_ready(self):
+        return self.show_teams and self.teams.fitted
+
     def place_player(self, role, flags=0):
         self.pause()
-        point, player = self.mouse, None
         dets = self.detections()
-        if dets and not flags & cv2.EVENT_FLAG_CTRLKEY:
-            player = detection.player_at(self.mouse, dets)
-            if player is not None:
-                point = player.foot
+        player = detection.player_at(self.mouse, dets) if dets else None
+        snap = player is not None and not flags & cv2.EVENT_FLAG_CTRLKEY
+        point = player.foot if snap else self.mouse
         m = self.current_markup(create=True)
-        m.set_player(role, point)
+
+        if role == "defender":
+            m.set_players(defender=point, defender_auto=False)
+            if len(m.calib) < 2:
+                self.flash("Calibrate this frame (4) to draw offside lines")
+            elif snap:
+                self.flash("Defender snapped to player's feet (Ctrl+click to place freely)")
+            return
+
+        # The team comes from the player clicked on, even with Ctrl (exact placement)
+        team = self.team_of(player)[0] if player is not None and self.teams_ready() else None
+        m.set_players(attacker=point, attacker_team=team)
         if len(m.calib) < 2:
             self.flash("Calibrate this frame (4) to draw offside lines")
-        elif player is not None:
-            who = "player"
-            if self.show_teams and self.teams.fitted:
-                team = self.team_of(player)[0]
-                who = f"team {team} player" if team != teams.OTHER else "player (no team)"
-            self.flash(f"{role.capitalize()} snapped to {who}'s feet (Ctrl+click to place freely)")
+        elif m.defender is None or m.defender_auto:
+            self.flash(self.auto_defender(m))
+        elif snap:
+            self.flash("Attacker snapped to player's feet (Ctrl+click to place freely)")
+
+    def auto_defender(self, m):
+        """Place the second-last defender automatically. Returns a message saying what happened."""
+        if len(m.calib) < 2:
+            return "Calibrate this frame (4) first"
+        if not self.teams_ready():
+            return "Turn on teams (t) to find the second-last defender automatically"
+        dets = self.detections()
+        if dets is None:
+            return "Detections not ready yet: press f to try again"
+        if m.attacker is None:
+            return "Place the attacker first (left-click)"
+        if m.attacker_team not in teams.TEAM_LABELS:
+            return "Attacker's team unknown: left-click inside their box"
+        defending = teams.TEAM_LABELS[1 - teams.TEAM_LABELS.index(m.attacker_team)]
+        candidates = [d for d in dets if d.kind == "player" and self.team_of(d)[0] == defending]
+        try:
+            i = geometry.second_last_defender(m.calib[0], m.calib[1], [d.foot for d in candidates],
+                                              keeper_in_list=self.keeper_in_team)
+        except ValueError:
+            return "Calibration lines are invalid: recalibrate (4)"
+        if i is None:
+            return f"Not enough team {defending} players visible: right-click the defender"
+        m.set_players(defender=candidates[i].foot, defender_auto=True)
+        rule = "2nd deepest, keeper in team colours" if self.keeper_in_team else "deepest outfield player"
+        return f"Auto defender: team {defending} {rule} (g: keeper rule, right-click: override)"
 
     def drag_move(self, x, y):
         d = self.drag
@@ -527,6 +573,17 @@ class VarApp:
             if self.show_teams and not self.show_detect:
                 self.show_detect = True
                 self.ensure_detector()
+        elif ch == "f":
+            self.pause()
+            self.flash(self.auto_defender(self.current_markup(create=True)))
+        elif ch == "g":
+            self.keeper_in_team = not self.keeper_in_team
+            m = self.current_markup()
+            if m and m.defender_auto:
+                self.flash(self.auto_defender(m))
+            else:
+                self.flash("Keeper counted in team colours" if self.keeper_in_team
+                           else "Keeper not in team colours: deepest outfield player is second-last")
         elif ch == "p":
             self.show_detect = True
             self.ensure_detector().scan(self.idx)
@@ -559,6 +616,8 @@ class VarApp:
             return "Calibrated. Press 5 to place players (clicking again recalibrates)"
         if n < 2:
             return "Calibrate this frame first (press 4)"
+        if self.teams_ready():
+            return "Left-click the attacker: the second-last defender is found automatically"
         return "Left-click attacker, right-click second-last defender (ground point)"
 
     def preview(self):
@@ -578,7 +637,8 @@ class VarApp:
         draw = m or Markup()
         if self.drag and self.drag["kind"] == "free":
             draw = Markup(shapes=draw.shapes + [("free", self.drag["pts"])], calib=draw.calib,
-                          attacker=draw.attacker, defender=draw.defender)
+                          attacker=draw.attacker, defender=draw.defender,
+                          defender_auto=draw.defender_auto)
         dets = self.detections()
         self.update_teams()
         team_of = self.team_of if self.show_teams and self.teams.fitted else None
