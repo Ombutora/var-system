@@ -3,7 +3,7 @@
 A Video Assistant Referee review tool for football footage. Open any video file and you can:
 
 - **Replay it frame by frame:** play, pause, step one or ten frames, slow motion down to 0.1x, a seek bar, and zoom up to 10x at the cursor.
-- **Mark it up:** draw straight lines and freehand on any frame. Markup is kept per frame while the window is open.
+- **Mark it up:** draw straight lines and freehand on any frame. Markup is kept per frame and saved next to the video, so it's still there next time you open the clip.
 - **Draw offside lines:** calibrate the frame's perspective from the pitch markings, then click the attacker and the second-last defender. You get true offside lines that follow the pitch's perspective, plus a verdict. The "behind the ball" exception is applied when the ball's position is known.
 - **Detect players and the ball automatically:** a pretrained YOLO model boxes every player and the ball and draws the ball's recent path. In offside mode, clicking a detected player snaps the point to their feet.
 - **Split players into teams by jersey colour:** each team's boxes are drawn in its shirt colour. Referees, goalkeepers and fans in the stands are shown in grey.
@@ -27,6 +27,8 @@ py -3 -m venv .venv
 ```
 
 It works with any format OpenCV can decode (mp4, mkv, avi, mov...). Use `--max-width` and `--max-height` to change the window size (default 1280x720). Press **h** in the window to show the controls.
+
+Markup is saved to `<video>.var.json` next to the video (e.g. `clip.mp4.var.json`). Use `--markup path	oile.json` to keep it somewhere else, for example when the video is in a read-only folder.
 
 Detection options: `--imgsz` (default 1280), `--device` (`cpu`, or `0` for the first GPU), `--player-conf`, `--ball-conf` and `--weights`.
 
@@ -110,7 +112,17 @@ The number in brackets is the margin in screen pixels: positive means beyond the
 
 Press `s`. A full-resolution PNG of the frame, with the lines, labels, verdict, file name and timestamp, is saved to `snapshots\<clip>_f<frame>.png` in the folder you ran the tool from.
 
-Markup is kept for each frame while the window is open, so you can step away and come back to it. It isn't saved to disk, so save a snapshot of each frame you want to keep before quitting with `q` or `Esc`.
+Quit with `q` or `Esc` when you're done.
+
+### Your markup is saved automatically
+
+Everything you draw, calibrate and click is saved to `<video>.var.json` next to the video, about once a second and again when you quit. Open the same clip later and every marked frame comes back as you left it, with its lines and verdict. The status strip says how many frames were loaded.
+
+- Frames with `[markup]` in the status strip have something saved. Step through the clip to find them.
+- Undo history isn't saved, so `u` can't undo changes from an earlier session. Use `x` to clear a frame and start it again.
+- To start the whole clip over, delete the `.var.json` file before opening it.
+- If the file can't be read (for example, after editing it by hand), the tool says so, opens with no markup and **doesn't save over it** for that session, so nothing in it is lost.
+- The file is plain JSON: one entry per marked frame with the points in video pixels. You can keep it with the clip or share it with someone else who has the same video.
 
 ### Tips
 
@@ -260,4 +272,4 @@ On the frame where the ball is played, calibrate (`4`), turn on teams (`t`) and 
 .venv\Scripts\python.exe -m pytest
 ```
 
-The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The auto-defender and auto-attacker tests run the app with a fake detector (see `tests/conftest.py`). They cover picking by pitch depth, the keeper rule, finding the ball carrier, leaving out the passer, cycling attackers, switching teams, manual overrides, Ctrl+click, undo and the behind-the-ball exception (auto ball point, Shift+click, a ball in the air). The tests don't need the YOLO model.
+The tests simulate broadcast cameras with known perspective, then check that the offside lines and verdicts match the true pitch positions. They also cover how detections are filtered, how clicks snap to players, and how the ball trail is built. Team tests draw synthetic players in different lighting, with a referee and fans, and check the split. The auto-defender and auto-attacker tests run the app with a fake detector (see `tests/conftest.py`). They cover picking by pitch depth, the keeper rule, finding the ball carrier, leaving out the passer, cycling attackers, switching teams, manual overrides, Ctrl+click, undo and the behind-the-ball exception (auto ball point, Shift+click, a ball in the air). The markup file tests check that every field survives reopening the clip, that unchanged markup isn't rewritten, and that an unreadable file is never overwritten. The tests don't need the YOLO model.
