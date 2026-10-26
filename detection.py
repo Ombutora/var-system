@@ -6,10 +6,12 @@ the whole clip so playback and ball trails are instant afterwards.
 """
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
+
+import teams
 
 PERSON, SPORTS_BALL = 0, 32  # COCO class ids
 
@@ -19,6 +21,9 @@ class Detection:
     kind: str  # "player" | "ball"
     box: tuple  # (x1, y1, x2, y2) in frame pixels
     conf: float
+    lab: tuple = None  # players: median shirt colour (Lab), for team detection
+    bgr: tuple = None  # the same colour in BGR, for display
+    on_pitch: bool = True  # players: standing on grass (False for fans in the stands)
 
     @property
     def foot(self):
@@ -48,13 +53,31 @@ def parse_detections(xyxy, cls, conf, player_conf=0.35, ball_conf=0.15):
     return players + ([best_ball] if best_ball else [])
 
 
-def snap_to_player(point, detections):
-    """Foot point of the smallest player box containing `point`, or None."""
+def add_jersey_colors(frame, detections):
+    """Attach each player's shirt colour, used to split them into teams."""
+    out = []
+    for d in detections:
+        if d.kind == "player":
+            color = teams.jersey_color(frame, d.box)
+            d = replace(d, on_pitch=teams.on_grass(frame, d.box))
+            if color:
+                d = replace(d, lab=color[0], bgr=color[1])
+        out.append(d)
+    return out
+
+
+def player_at(point, detections):
+    """Smallest player box containing `point` (the one in front when boxes overlap), or None."""
     hits = [d for d in detections if d.kind == "player" and d.contains(point)]
     if not hits:
         return None
-    x = min(hits, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]))
-    return x.foot
+    return min(hits, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]))
+
+
+def snap_to_player(point, detections):
+    """Foot point of the player under `point`, or None."""
+    d = player_at(point, detections)
+    return d.foot if d else None
 
 
 def ball_trail(results, idx, length=25):
@@ -130,6 +153,7 @@ class DetectionWorker(threading.Thread):
         b = r.boxes
         dets = parse_detections(b.xyxy.cpu().numpy(), b.cls.cpu().numpy(), b.conf.cpu().numpy(),
                                 self.player_conf, self.ball_conf)
+        dets = add_jersey_colors(frame, dets)
         with self.lock:
             self._results[idx] = dets
 
